@@ -109,8 +109,8 @@ function derivadaErro(saida, esperado) {
   return saida.map((x, i) => x-esperado[i]);
 }
 
-function entropiaCruzada(y, yHat) {
-  return -y.reduce((s, yi, i) => s+yi*Math.log(yHat[i]+1e-12), 0);
+function entropiaCruzada(y, yChapeu) {
+  return -y.reduce((s, yi, i) => s+yi*Math.log(yChapeu[i]+1e-12), 0);
 }
 
 function derivadaEntropiaCruzada(y, yChapeu) {
@@ -128,6 +128,17 @@ function regularL2(pesos, lambda) {
 
 function dropout(vetor, taxa) {
   return vetor.map(val => Math.random()<taxa ? 0 : val/(1-taxa));
+}
+
+function clipGradientes(grad, maxVal=1.0) {
+  return Math.min(Math.max(grad, -maxVal), maxVal);
+}
+
+function normalizarEntrada(vetor) {
+  const max = Math.max(...vetor);
+  const min = Math.min(...vetor);
+  const amplitude = max-min || 1e-8;
+  return vetor.map(x => (x-min)/amplitude);
 }
 
 // funções de pesos:
@@ -223,7 +234,32 @@ function iniciarPesosUniforme(linhas, cols, limiteInferior=-0.05, limiteSuperior
   return m;
 }
 
-// matrizes:
+// matrizes 3D:
+function tensor3D(profundidade, linhas, colunas, escala=0.1) {
+  let t = [];
+  for(let d=0; d<profundidade; d++) {
+    t[d] = matriz(linhas, colunas, escala);
+  }
+  return t;
+}
+
+function zeros3D(p, l, c) {
+  return Array.from({length: p}, () => matrizZeros(l, c));
+}
+
+function mapear3D(tensor, fn) {
+  return tensor.map(m => m.map(linha => linha.map(fn)));
+}
+
+function somar3D(a, b) {
+  return a.map((mat, i) => somarMatriz(mat, b[i]));
+}
+
+function mult3DporEscalar(tensor, escalar) {
+  return tensor.map(m => multMatriz(m, escalar));
+}
+
+// matrizes 2D:
 function matriz(linhas, cols, escala=0.1) {
   let m = [];
   for(let i=0; i<linhas; i++) {
@@ -312,6 +348,10 @@ function clip(v, min, max) {
 
 function zeros(n) {
   return Array(n).fill(0);
+}
+
+function aplicarFuncaoVetor(vetor, fn) {
+  return vetor.map(x => fn(x));
 }
 
 // debug:
@@ -456,13 +496,13 @@ class CamadaRNN {
     this.derivada = derivada;
     
     
-    this.pEntrada = inicializador=="xavier" 
-      ? iniciarPesosXavier(ocultoTam, entradaTam)
-      : iniciarPesosHe(ocultoTam, entradaTam);
+    this.pEntrada = inicializador=="xavier" ?
+    iniciarPesosXavier(ocultoTam, entradaTam) :
+    iniciarPesosHe(ocultoTam, entradaTam);
       
-    this.pOculta = inicializador=="xavier"
-      ? iniciarPesosXavier(ocultoTam, ocultoTam)
-      : iniciarPesosHe(ocultoTam, ocultoTam);
+    this.pOculta = inicializador=="xavier" ?
+    iniciarPesosXavier(ocultoTam, ocultoTam) :
+    iniciarPesosHe(ocultoTam, ocultoTam);
       
     this.bias = vetor(ocultoTam);
     
@@ -521,6 +561,128 @@ class CamadaRNN {
   }
 }
 
+class CamadaLSTM {
+  constructor(entradaTam, ocultaTam, inicializador="xavier") {
+    this.entradaTam = entradaTam;
+    this.ocultaTam = ocultaTam;
+
+    const tamCombinado = entradaTam + ocultaTam;
+    this.pEsquecimento = inicializador=="xavier" ?
+    iniciarPesosXavier(ocultaTam, tamCombinado) :
+    iniciarPesosHe(ocultaTam, tamCombinado);;
+    
+    this.pEntrada = inicializador=="xavier" ?
+    iniciarPesosXavier(ocultaTam, tamCombinado) :
+    iniciarPesosHe(ocultaTam, tamCombinado);
+    
+    this.pCelula = inicializador=="xavier" ?
+    iniciarPesosXavier(ocultaTam, tamCombinado) :
+    iniciarPesosHe(ocultaTam, tamCombinado);
+    
+    this.pSaida = inicializador=="xavier" ?
+    iniciarPesosXavier(ocultaTam, tamCombinado) :
+    iniciarPesosHe(ocultaTam, tamCombinado);
+
+    this.bf = zeros(ocultaTam);
+    this.bEntrada = zeros(ocultaTam);
+    this.bCelula = zeros(ocultaTam);
+    this.bSaida = zeros(ocultaTam);
+
+    this.longoPrazo = zeros(ocultaTam);
+    this.curtoPrazo = zeros(ocultaTam);
+    this.cache = [];
+  }
+
+  propagar(entrada, estadoAnterior = null) {
+    const [l_prev, c_prev] = estadoAnterior || [this.longoPrazo, this.curtoPrazo];
+    const eL = [...entrada, ...l_prev];
+
+    const es = aplicarFuncaoVetor(somarVetores(aplicarMatriz(this.pEsquecimento, eL), this.bf), sigmoid);
+    const e = aplicarFuncaoVetor(somarVetores(aplicarMatriz(this.pEntrada, eL), this.bEntrada), sigmoid);
+    const p = aplicarFuncaoVetor(somarVetores(aplicarMatriz(this.pCelula, eL), this.bCelula), tanh);
+    const s = aplicarFuncaoVetor(somarVetores(aplicarMatriz(this.pSaida, eL), this.bSaida), sigmoid);
+
+    const curtoPrazo = somarVetores(multVetores(es, c_prev), multVetores(e, p));
+    const longoPrazo = multVetores(s, curtoPrazo.map(tanh));
+
+    this.cache.unshift({ eL, es, e, p, s, c_prev });
+    this.longoPrazo = longoPrazo;
+    this.curtoPrazo = curtoPrazo;
+
+    return longoPrazo;
+  }
+
+  retropropagar(dO, dC_proximo, taxaAprendizado) {
+    const { eL, es, e, p, s, c_prev } = this.cache.shift();
+    const curtoPrazo = this.curtoPrazo;
+
+    // clipar gradientes para evitar NaN
+    dO = dO.map(val => clipGradientes(val, 5));
+    dC_proximo = dC_proximo.map(val => clipGradientes(val, 5));
+
+    const tanh_c = curtoPrazo.map(tanh);
+    const dtanh_c = tanh_c.map(derivadaTanh);
+
+    const dL_crua = multVetores(dO, tanh_c).map((val, idc) => val*derivadaSigmoid(s[idc]));
+    const dC_cru = somarVetores(
+      multVetores(dO, multVetores(s, dtanh_c)),
+      dC_proximo
+    );
+    const dE_crua = multVetores(dC_cru, p).map((val, idc) => val*derivadaSigmoid(e[idc]));
+    const dP_cru = multVetores(dC_cru, e).map((val, idc) => val*derivadaTanh(p[idc]));
+    const dEs_cru = multVetores(dC_cru, c_prev).map((val, idc) => val*derivadaSigmoid(es[idc]));
+
+    const dpEsquecimento = exterior(dEs_cru, eL);
+    const dpEntrada = exterior(dE_crua, eL);
+    const dpCelula = exterior(dP_cru, eL);
+    const dpSaida = exterior(dC_cru, eL);
+
+    this.pEsquecimento = subtrairMatriz(this.pEsquecimento, multMatriz(dpEsquecimento, taxaAprendizado));
+    this.pEntrada = subtrairMatriz(this.pEntrada, multMatriz(dpEntrada, taxaAprendizado));
+    this.pCelula = subtrairMatriz(this.pCelula, multMatriz(dpCelula, taxaAprendizado));
+    this.pSaida = subtrairMatriz(this.pSaida, multMatriz(dpSaida, taxaAprendizado));
+
+    const dpEsquecimento_entrada = transpor(this.pEsquecimento).slice(0, this.entradaTam);
+    const dpEntrada_entrada = transpor(this.pEntrada).slice(0, this.entradaTam);
+    const dpCelula_entrada = transpor(this.pCelula).slice(0, this.entradaTam);
+    const dpSaida_entrada = transpor(this.pSaida).slice(0, this.entradaTam);
+
+    const dE = somarVetores(
+      aplicarMatriz(dpEsquecimento_entrada, dEs_cru),
+      somarVetores(
+        aplicarMatriz(dpEntrada_entrada, dE_crua),
+        somarVetores(
+          aplicarMatriz(dpCelula_entrada, dP_cru),
+          aplicarMatriz(dpSaida_entrada, dL_crua)
+      )
+    ));
+
+    const dL_prev = somarVetores(
+      aplicarMatriz(transpor(this.pEsquecimento).slice(this.entradaTam), dEs_cru),
+      somarVetores(
+        aplicarMatriz(transpor(this.pEntrada).slice(this.entradaTam), dE_crua),
+        somarVetores(
+          aplicarMatriz(transpor(this.pCelula).slice(this.entradaTam), dP_cru),
+          aplicarMatriz(transpor(this.pSaida).slice(this.entradaTam), dL_crua)
+      )
+    ));
+
+    const dc_prev = multVetores(es, dC_cru);
+
+    return { 
+      dE: dE.map(val => clipGradientes(val, 5)), 
+      dL_prev: dL_prev.map(val => clipGradientes(val, 5)), 
+      dc_prev 
+    };
+  }
+
+  resetarEstado() {
+    this.longoPrazo = zeros(this.ocultaTam);
+    this.curtoPrazo = zeros(this.ocultaTam);
+    this.cache = [];
+  }
+}
+
 // modelo:
 class Modelo {
   constructor() {
@@ -547,7 +709,7 @@ class Modelo {
 }
 
 // tokenização:
-class TokenizadorBPE {
+class BPE {
   constructor(merges=[]) {
     this.vocab = {};
     this.bpeRanks = {};
