@@ -1,3 +1,4 @@
+// biblioteca 100% JS
 // ativações:
 function degrau(x) {
   return x >= 0 ? 1 : 0;
@@ -100,11 +101,9 @@ function addRuido(v, intensidade=0.01) {
 function erroAbsolutoMedio(saida, esperado) {
   return saida.reduce((s, x, i) => s+Math.abs(x-esperado[i]), 0)/saida.length;
 }
-
 function erroQuadradoEsperado(saida, esperado) {
   return saida.reduce((s, x, i) => s+0.5*(x-esperado[i])**2, 0);
 }
-
 function derivadaErro(saida, esperado) {
   return saida.map((x, i) => x-esperado[i]);
 }
@@ -112,9 +111,34 @@ function derivadaErro(saida, esperado) {
 function entropiaCruzada(y, yChapeu) {
   return -y.reduce((s, yi, i) => s+yi*Math.log(yChapeu[i]+1e-12), 0);
 }
-
 function derivadaEntropiaCruzada(y, yChapeu) {
   return yChapeu.map((yci, i) => yci-y[i]);
+}
+
+function huberLoss(saida, esperado, delta=1.0) {
+  const erros = saida.map((x, i) => {
+    const diff = x-esperado[i];
+    return Math.abs(diff) <= delta ? 0.5*diff*diff : delta*(Math.abs(diff)-0.5*delta);
+  });
+  return erros.reduce((s, x) => s+x, 0)/saida.length;
+}
+
+function derivadaHuber(saida, esperado, delta=1.0) {
+  return saida.map((x, i) => {
+    const diff = x-esperado[i];
+    return Math.abs(diff) <= delta ? diff : delta*Math.sign(diff);
+  });
+}
+
+function tripletLoss(ancora, positiva, negativa, margem=1.0) {
+  const distPos = ancora.reduce((s, a, i) => s+(a-positiva[i])**2, 0);
+  const distNeg = ancora.reduce((s, a, i) => s+(a-negativa[i])**2, 0);
+  return Math.max(0, distPos-distNeg+margem);
+}
+
+function contrastiveLoss(saida1, saida2, rotulo, margem=1.0) {
+  const distancia = saida1.reduce((s, x, i) => s+(x-saida2[i])**2, 0);
+  return rotulo===1 ? distancia : Math.max(0, margem-Math.sqrt(distancia));
 }
 
 // funções de regularização:
@@ -139,6 +163,57 @@ function normalizarEntrada(vetor) {
   const min = Math.min(...vetor);
   const amplitude = max-min || 1e-8;
   return vetor.map(x => (x-min)/amplitude);
+}
+
+function acuracia(saida, esperado) {
+  const corretos = saida.reduce((s, x, i) => s+(argmax(x)===argmax(esperado[i]) ? 1 : 0), 0);
+  return corretos/saida.length;
+}
+
+function precisao(confusao) {
+  const tp = confusao[0][0], fp = confusao[0].slice(1).reduce((a,b) => a+b, 0);
+  return tp/(tp+fp+1e-8); // evita divisão por zero
+}
+
+function recall(confusao) {
+  const tp = confusao[0][0], fn = confusao.slice(1).reduce((s, l) => s+l[0], 0);
+  return tp/(tp+fn+1e-8);
+}
+
+function f1Score(confusao) {
+  const p = precisao(confusao), r = recall(confusao);
+  return 2*(p*r)/(p+r+1e-8);
+}
+
+function matrizConfusao(saidas, esperados) {
+  const classes = saidas[0].length;
+  const matriz = Array.from({length: classes}, () => Array(classes).fill(0));
+  saidas.forEach((s, i) => {
+    const pred = argmax(s);
+    const real = argmax(esperados[i]);
+    matriz[real][pred]++;
+  });
+  return matriz;
+}
+
+function mse(saida, esperado) {
+  return saida.reduce((s, x, i) => s+(x-esperado[i])**2, 0)/saida.length;
+}
+
+function klDivergencia(p, q) {
+  return p.reduce(((s, pi, i) => s+(pi*Math.log((pi+1e-12)/(q[i]+1e-12)))), 0);
+}
+
+function rocAuc(pontos, rotulos) {
+  const pares = pontos.map((s, i) => [s, rotulos[i]]).sort((a,b) => b[0]-a[0]);
+  let auc = 0, fp = 0, tp = 0, fpPrev = 0, tpPrev = 0;
+  pares.forEach(([s, r]) => {
+    if(r===1) tp++; else fp++;
+    auc += (fp-fpPrev)*(tp+tpPrev)/2;
+    fpPrev = fp;
+    tpPrev = tp;
+  });
+  return auc/(tp*fp);
 }
 
 // funções de pesos:
@@ -818,5 +893,37 @@ class BPE {
       return this.byteDecoder[t] != undefined ? this.byteDecoder[t] : 63; // ?
     });
     return new TextDecoder().decode(Uint8Array.from(bytes));
+  }
+}
+
+class PositionalEncoding {
+  constructor(dModelo, maxTam=5000) {
+    this.dModelo = dModelo;
+    this.maxTam = maxTam;
+    this.pe = this.criarPosicionalEncoding();
+  }
+
+  criarPosicionalEncoding() {
+    const pe = matrizZeros(this.maxTam, this.dModelo);
+    for(let pos=0; pos<this.maxTam; pos++) {
+      for(let i=0; i<this.dModelo; i+=2) {
+        const denom = Math.pow(10000, i/this.dModelo);
+        pe[pos][i] = Math.sin(pos/denom);
+        if(i+1<this.dModelo) {
+          pe[pos][i+1] = Math.cos(pos/denom);
+        }
+      }
+    }
+    return pe;
+  }
+
+  aplicar(embeddingSeq) {
+    // verifica se as dimensões são compatíveis
+    if(embeddingSeq[0].length != this.dModelo) {
+      throw new Error(`dimensão do embedding (${embeddingSeq[0].length}) ≠ dModelo (${this.dModelo})`);
+    }
+    return embeddingSeq.map((embedding, pos) =>
+      somarVetores(embedding, this.pe[pos])
+    );
   }
 }
