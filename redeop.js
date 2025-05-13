@@ -89,6 +89,19 @@ function softmax(arr, temperatura=1) {
   return exps.map(e => e/soma);
 }
 
+function derivadaSoftmax(vetor, gradSaida) {
+  const gs = []; 
+  for(let i=0; i<vetor.length; i++) {
+    let soma = 0;
+    for(let j=0; j<vetor.length; j++) {
+      let delta = (i==j ? 1 : 0)-vetor[j];
+      soma += gradSaida[j]*vetor[i]*delta;
+    }
+    gs[i] = soma;
+  }
+  return gs;
+}
+
 function argmax(v) {
   return v.indexOf(Math.max(...v));
 }
@@ -367,6 +380,12 @@ function subtrairMatriz(a, b) {
 
 function multMatriz(m, s) {
   return m.map(linha => linha.map(v => v*s));
+}
+
+function multMatrizes(a, b) {
+  return a.map(linhaA => b[0].map((_, j) => linhaA.reduce((soma, valA, k) => soma+valA*(b[k] ? b[k][j] : 0), 0)
+    )
+  );
 }
 
 function multElementos(a, b) {
@@ -755,6 +774,109 @@ class CamadaLSTM {
     this.longoPrazo = zeros(this.ocultaTam);
     this.curtoPrazo = zeros(this.ocultaTam);
     this.cache = [];
+  }
+}
+
+class CamadaAtencao {
+  constructor(dModelo) {
+    this.dModelo = dModelo;
+    this.pQ = iniciarPesosXavier(dModelo, dModelo);
+    this.pK = iniciarPesosXavier(dModelo, dModelo);
+    this.pV = iniciarPesosXavier(dModelo, dModelo);
+  }
+
+  propagar(entrada) {
+    this.entrada = entrada;
+    this.Q = multMatrizes(entrada, this.pQ);
+    this.K = multMatrizes(entrada, this.pK);
+    this.V = multMatrizes(entrada, this.pV);
+
+    const KT = transpor(this.K);
+    this.pontos = multMatrizes(this.Q, KT);
+    this.escala = Math.sqrt(this.dModelo);
+    
+    this.pontosEscalados = this.pontos.map((linha) => {
+      return linha.map((x) => {
+        return x/this.escala;
+      }, this);
+    }, this);
+
+    this.pesosAtencao = this.pontosEscalados.map((linha) => {
+      return softmax(linha);
+    });
+    const saida = multMatrizes(this.pesosAtencao, this.V);
+    return saida;
+  }
+
+  retropropagar(dSaida, taxaAprendizado) {
+    // gradiente em V:
+    const pesosT = transpor(this.pesosAtencao);
+    const dV = multMatrizes(pesosT, dSaida);
+
+    // gradiente em pesosAtencao:
+    const VT = transpor(this.V);
+    const dPesos = multMatrizes(dSaida, VT);
+
+    // retropropaga softmax em cada linha
+    const dPontosEsc = [];
+    for(let i=0; i<dPesos.length; i++) {
+      dPontosEsc[i] = derivadaSoftmax(this.pesosAtencao[i], dPesos[i]);
+    }
+
+    // remove escala
+    const dPontos = dPontosEsc.map((linha) => {
+      return linha.map((x) => {
+        return x/this.escala;
+      }, this);
+    }, this);
+
+    // gradientes em Q e K:
+    const dQ = multMatrizes(dPontos, this.K);
+    // dK = dScores^T × Q
+    const dPontosT = transpor(dPontos);
+    const dK = multMatrizes(dPontosT, this.Q);
+
+    // gradiente na entrada via pQ, pK, pV:
+    const pQT = transpor(this.pQ);
+    const dEntradaQ = multMatrizes(dQ, pQT);
+    const pKT = transpor(this.pK);
+    const dEntradaK = multMatrizes(dK, pKT);
+    const pVT = transpor(this.pV);
+    const dEntradaV = multMatrizes(dV, pVT);
+
+    // soma dos três caminhos
+    const dEntrada = [];
+    for(let i=0; i<this.entrada.length; i++) {
+      dEntrada[i] = [];
+      for(let j=0; j<this.dModelo; j++) {
+        dEntrada[i][j] = dEntradaQ[i][j]+dEntradaK[i][j]+dEntradaV[i][j];
+      }
+    }
+
+    // gradientes nos pesos: pQ, pK, pV
+    const entradaT = transpor(this.entrada);
+    const dPQ = multMatrizes(entradaT, dQ);
+    const dPK = multMatrizes(entradaT, dK);
+    const dPV = multMatrizes(entradaT, dV);
+
+    // atualização
+    this.pQ = this.pQ.map((linha, i) => {
+      return linha.map((p, j) => {
+        return p-taxaAprendizado*dPQ[i][j];
+      });
+    });
+    this.pK = this.pK.map((linha, i) => {
+      return linha.map((p, j) => {
+        return p-taxaAprendizado*dPK[i][j];
+      });
+    });
+    this.pV = this.pV.map((linha, i) => {
+      return linha.map((p, j) => {
+        return p-taxaAprendizado*dPV[i][j];
+      });
+    });
+
+    return dEntrada;
   }
 }
 
